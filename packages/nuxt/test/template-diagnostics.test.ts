@@ -66,7 +66,7 @@ describe('template diagnostics', () => {
         name: 'NUXT_B4025',
         message: '`<NuxtLink to="/abuot">` in `/app/pages/index.vue` does not match any page route.',
         fix: expect.stringContaining('`external` prop'),
-        docs: 'https://nuxt.com/docs/4.x/errors/b4025',
+        docs: 'https://nuxt.com/docs/5.x/errors/b4025',
         sources: ['/app/pages/index.vue:3:15'],
       })
     })
@@ -188,14 +188,14 @@ describe('template diagnostics', () => {
       expect(warnings).toHaveLength(2)
     })
 
-    it('keeps a warning while another environment still raises it', () => {
+    it('reports a warning again once a compile for either environment no longer raises it', () => {
       const { compile, warnings } = setup()
       const broken = `<template><ServerCard @click="go" /></template>`
       compile(broken)
       compile(broken, { ssr: true })
       compile(`<template><ServerCard /></template>`)
-      compile(broken)
-      expect(warnings).toHaveLength(1)
+      compile(broken, { ssr: true })
+      expect(warnings).toHaveLength(2)
     })
   })
 

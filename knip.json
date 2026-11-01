@@ -28,6 +28,7 @@
       "entry": [
         "scripts/*",
         "bench/**/*.{ts,mjs}",
+        "bench/fixtures/**/*.vue",
         "test/*.ts",
         "test/bench/*.ts",
         "test/e2e/*.ts",
@@ -104,6 +105,7 @@
         "mocked-exports",
         "vue-devtools-stub",
         "ohash",
+        "unenv",
         "@babel/plugin-proposal-decorators",
         "@babel/plugin-syntax-typescript"
       ]
@@ -205,7 +207,6 @@
         "pug-plain-loader",
         "raw-loader",
         "rolldown-string",
-        "rollup",
         "seroval",
         "time-fix-plugin",
         "tinyglobby",

@@ -21,7 +21,7 @@ import { markPagesCoveredByRouteRule } from './route-coverage.ts'
 import { collectStaticPageRoutes, getAssetPathsForRoute } from './public-assets.ts'
 import { PageMetaPlugin } from './plugins/page-meta.ts'
 import { toVirtualId } from '../core/utils/virtual.ts'
-import { createNormalizedRouteRulesRouter, mergeMethodRouteRulesRoutes, normalizeAppMiddlewareRules, normalizeRouteRulePath, parseRouteRulesRoute, resolveRouteRulesRoutes } from '../core/utils/route-rules.ts'
+import { createNormalizedRouteRulesRouter, mergeMethodRouteRulesRoutes, normalizeAppMiddlewareRules, normalizeRouteRuleLookupPath, normalizeRouteRulePath, parseRouteRulesRoute, resolveRouteRulesRoutes } from '../core/utils/route-rules.ts'
 import { setTemplateDiagnosticsRouteMatcher } from '../core/template-diagnostics.ts'
 import { getBuiltinComponentMeta } from '../components/builtin-metadata.ts'
 import { RouteInjectionPlugin } from './plugins/route-injection.ts'
@@ -682,7 +682,7 @@ export default defineNuxtModule({
         const caseSensitiveRouteRules = !!nuxt.options.router.options.sensitive
         const ruleMatcher = createNormalizedRouteRulesRouter(nitro.routing.routeRules.routes, '', !caseSensitiveRouteRules)
         for (const route of prerenderRoutes) {
-          const rules = defu({} as Record<string, any>, ...ruleMatcher.matchAll('', normalizeRouteRulePath(route, !caseSensitiveRouteRules)).reverse())
+          const rules = defu({} as Record<string, any>, ...ruleMatcher.matchAll('', normalizeRouteRuleLookupPath(route, !caseSensitiveRouteRules)).reverse())
           if (rules.prerender) {
             nitro.options.prerender.routes.push(route)
           }
@@ -790,6 +790,7 @@ export default defineNuxtModule({
 
     const serverComponentRuntime = await findPath(join(distDir, 'components/runtime/server-component')) ?? join(distDir, 'components/runtime/server-component')
     const clientComponentRuntime = await findPath(join(distDir, 'components/runtime/client-component')) ?? join(distDir, 'components/runtime/client-component')
+    const routeComponentRuntime = nuxt.options.dev ? undefined : await findPath(join(runtimeDir, 'utils')) ?? join(runtimeDir, 'utils')
 
     let nitroForRouteCoverage: NitroInstance | undefined
     nuxt.hook('nitro:init', (nitro) => {
@@ -845,6 +846,7 @@ export default defineNuxtModule({
           restrictedPages,
           serverComponentRuntime,
           clientComponentRuntime,
+          routeComponentRuntime,
           overrideMeta: !!nuxt.options.experimental.scanPageMeta,
         })
         return ROUTES_HMR_CODE + [...imports, `export default ${routes}`].join('\n')

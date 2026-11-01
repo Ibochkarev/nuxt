@@ -1,5 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import process from 'node:process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'pathe'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Nuxt } from '@nuxt/schema'
@@ -8,6 +10,7 @@ import type { NitroConfig } from 'nitro/types'
 import { createHooks } from 'hookable'
 import { createUnimport } from 'unimport'
 import { resolveModulePath } from 'exsolve'
+import { exec } from 'tinyexec'
 
 import { getLegacyRuntimeConfigPath, getNitroPackageResolutions, getServerImportsPresets, resolveNitroLegacyOptions, scanLegacyScope, setupNitroCompat } from '../src/compat.ts'
 import { getH3ImportsPreset, nuxtServerImportsPreset, v2ImportsPreset } from '../src/imports.ts'
@@ -167,15 +170,15 @@ describe('setupNitroCompat', () => {
     const report = vi.spyOn(nitroBuildDiagnostics, 'NUXT_B9002').mockImplementation(() => ({}) as any)
     const nitroConfig: NitroConfig = {
       handlers: [
-        declared({ handler: '/modules/a.ts' }, 'nitro2'),
-        declared({ handler: '/modules/b.ts' }, 'nitro2'),
+        declared({ handler: '/project/modules/a.ts' }, 'nitro2'),
+        declared({ handler: '/project/node_modules/.pnpm/b@1.0.0/node_modules/b/dist/runtime/b.js' }, 'nitro2'),
       ],
     }
 
     await setupNitroCompat(createNuxt(), nitroConfig, legacyOff, [])
 
     expect(report).toHaveBeenCalledTimes(1)
-    expect(report.mock.calls[0]![0]).toMatchObject({ count: 2 })
+    expect(report.mock.calls[0]![0]).toMatchObject({ count: 2, handlers: '`modules/a.ts`\n  - `b/dist/runtime/b.js`' })
     report.mockRestore()
   })
 
@@ -438,6 +441,38 @@ describe('setupNitroCompat', () => {
     report.mockRestore()
   })
 
+  it('reports server code from a dependency by its package name', async () => {
+    const report = vi.spyOn(nitroBuildDiagnostics, 'NUXT_B9003').mockImplementation(() => ({}) as any)
+    const root = mkdtempSync(join(tmpdir(), 'nitro-compat-dependency-'))
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }))
+    const dist = join(root, 'node_modules/.pnpm/@scope+utils@1.0.0/node_modules/@scope/utils/dist')
+    mkdirSync(dist, { recursive: true })
+    writeFileSync(join(dist, 'index.mjs'), `import { getQuery } from 'h3'\nexport const query = getQuery`)
+
+    const nitroConfig: NitroConfig = { imports: { imports: [{ name: 'query', from: join(dist, 'index.mjs') }] } as any }
+    await setupNitroCompat(createNuxt({ rootDir: root, srcDir: root }), nitroConfig, legacyOff, [])
+
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(report.mock.calls[0]![0]).toMatchObject({ modules: '`@scope/utils` (imports `h3`)' })
+    report.mockRestore()
+  })
+
+  it('leaves the app\'s own shared auto-import directory out of the v2 scope', async () => {
+    const report = vi.spyOn(nitroBuildDiagnostics, 'NUXT_B9003').mockImplementation(() => ({}) as any)
+    const root = mkdtempSync(join(tmpdir(), 'nitro-compat-shared-'))
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }))
+    mkdirSync(join(root, 'shared/utils'), { recursive: true })
+    writeFileSync(join(root, 'shared/utils/errors.ts'), `import { createError } from 'h3'\nexport const fail = () => createError({ status: 400 })`)
+
+    const nitroConfig: NitroConfig = { imports: { dirs: [join(root, 'shared/utils')] } as any }
+    const layers = [{ config: { rootDir: root, srcDir: root }, cwd: root }]
+    await setupNitroCompat(createNuxt({ rootDir: root, srcDir: root, serverDir: join(root, 'server'), _layers: layers }), nitroConfig, legacyOff, [])
+
+    expect(report).not.toHaveBeenCalled()
+    expect((nitroConfig.virtual!['#nuxt-compat/flags'] as () => string)()).toContain('legacyCompat = false')
+    report.mockRestore()
+  })
+
   it('installs the hooks bridge with the layer, which no option gates', async () => {
     vi.spyOn(nitroBuildDiagnostics, 'NUXT_B9003').mockImplementation(() => ({}) as any)
     const dir = mkdtempSync(join(tmpdir(), 'nitro-compat-hooks-'))
@@ -508,6 +543,39 @@ describe('setupNitroCompat', () => {
     await nitro.hooks.callHook('build:before', nitro)
 
     expect(report.mock.calls[1]![0]).toMatchObject({ count: 1, modules: expect.stringContaining('`#virtual-module/handler` (imports `h3`)') })
+    report.mockRestore()
+  })
+
+  it('reports a module again only for imports it has not been reported for', async () => {
+    const report = vi.spyOn(nitroBuildDiagnostics, 'NUXT_B9003').mockImplementation(() => ({}) as any)
+    const dir = mkdtempSync(join(tmpdir(), 'nitro-compat-late-module-'))
+    onTestFinished(() => rmSync(dir, { recursive: true, force: true }))
+    writeFileSync(join(dir, 'handler.ts'), `import { defineEventHandler } from 'h3'\nexport default defineEventHandler(() => 'legacy')`)
+    writeFileSync(join(dir, 'middleware.ts'), `import { defineEventHandler } from 'h3'\nexport default defineEventHandler(() => {})`)
+    writeFileSync(join(dir, 'plugin.ts'), `import { defineNitroPlugin } from 'nitropack/runtime'\nexport default defineNitroPlugin(() => {})`)
+
+    const build = async (lateFile: string) => {
+      report.mockClear()
+      const nitroConfig: NitroConfig = {
+        virtual: { '#late-module/entry': () => Promise.resolve(`import ${JSON.stringify(join(dir, lateFile))}`) },
+        handlers: [
+          { route: '/legacy', handler: join(dir, 'handler.ts') } as any,
+          { route: '/late', handler: '#late-module/entry' } as any,
+        ],
+      }
+      const registerLateScope = await setupNitroCompat(createNuxt(), nitroConfig, legacyOff, [], [{ dir, name: 'late-module' }])
+      const nitro = createLateNitro(nitroConfig)
+      registerLateScope(nitro)
+      await nitro.hooks.callHook('build:before', nitro)
+    }
+
+    await build('middleware.ts')
+    expect(report).toHaveBeenCalledTimes(1)
+    expect(report.mock.calls[0]![0]).toEqual({ count: 1, modules: '`late-module` (imports `h3`)' })
+
+    await build('plugin.ts')
+    expect(report).toHaveBeenCalledTimes(2)
+    expect(report.mock.calls[1]![0]).toEqual({ count: 1, modules: '`late-module` (imports `nitropack/runtime`)' })
     report.mockRestore()
   })
 
@@ -883,7 +951,7 @@ export default defineEventHandler((event: H3Event) => event.req.headers)`)
     await nitro.hooks.callHook('build:before', nitro)
 
     expect(report).toHaveBeenCalledTimes(1)
-    expect(report.mock.calls[0]![0]).toMatchObject({ count: 1, files: expect.stringContaining('auth.ts` (uses `event.node`)') })
+    expect(report.mock.calls[0]![0]).toEqual({ count: 1, files: '`server/middleware/auth.ts` (uses `event.node`)' })
 
     report.mockClear()
     const registerLateLegacy = await setupNitroCompat(nuxt, { handlers: [] }, resolveNitroLegacyOptions(true), [])
@@ -948,7 +1016,7 @@ export default defineCachedHandler(() => createError({ statusCode: 404 }))`)
     await setupNitroCompat(createNuxt({ nitro: { esbuild: { options: {} } } as any }), { handlers: [] }, legacyOff, [])
 
     expect(report).toHaveBeenCalledTimes(1)
-    expect(report.mock.calls[0]![0]).toMatchObject({ keys: '`esbuild`' })
+    expect(report.mock.calls[0]![0]).toMatchObject({ keys: '`esbuild`', replacements: expect.stringContaining('`oxc`') })
 
     report.mockClear()
     // still read: by nitro v3 (`ignore`) or by Nuxt itself (`imports`)
@@ -1026,6 +1094,14 @@ export default defineCachedHandler(() => createError({ statusCode: 404 }))`)
     expect(devServerHandlers[3]!.handler).not.toBe(untouched[3])
     expect(devServerHandlers[2]!.handler).toBe(untouched[2])
     vi.restoreAllMocks()
+  })
+
+  it('wraps dev handlers without loading the nitro runtime stubs', async () => {
+    const wrapper = pathToFileURL(fileURLToPath(new URL('../src/runtime/compat/legacy-handler.ts', import.meta.url))).href
+    const { stdout, stderr } = await exec(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(wrapper)})`], {
+      nodeOptions: { env: { ...process.env, NODE_ENV: 'development', TEST: '' } },
+    })
+    expect(stdout + stderr).not.toContain('Nitro runtime imports')
   })
 
   it('mounts a routed v2 dev handler on its route and every path below it', async () => {
